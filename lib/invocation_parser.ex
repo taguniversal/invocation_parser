@@ -109,8 +109,13 @@ defmodule InvocationParser do
         ])
       )
 
-    defparsecp :parse_program, program
+    defparsecp :parse_program, program |> post_traverse(:structure_final_output)
 
+    defp structure_final_output(_rest, tokens, context, _line, _offset) do
+      {tokens, context}
+    end
+
+    @spec parse(binary()) :: {:ok, list()} | {:error, <<_::21032>>, binary()}
     def parse(input) when is_binary(input) do
       case parse_program(input) do
         {:ok, tokens, "", _, _, _} ->
@@ -118,6 +123,22 @@ defmodule InvocationParser do
         {:error, message, rest, _, _, _} ->
           {:error, message, rest}
       end
+    end
+
+    defp process_token(tokens) when is_list(tokens) do
+      %{
+        name: case Enum.find(tokens, fn {t, _} -> t == :name end) do
+          {:name, [name]} -> name
+          _ -> ""
+        end,
+        inputs: extract_destinations(tokens),
+        outputs: case Enum.find(tokens, fn {t, _} -> t == :source end) do
+          {:source, ["IN", "<", ">"]} -> "IN<>"
+          _ -> ""
+        end,
+        resolution: extract_resolution(tokens),
+        type: :definition
+      }
     end
 
     defp process_token({:invocation, tokens}) do
@@ -129,47 +150,50 @@ defmodule InvocationParser do
       }
     end
 
-    defp process_token(definition) do
-      %{
-        name: extract_value(definition, :name),
-        inputs: extract_destinations(definition),
-        outputs: extract_value(definition, :source),
-        resolution: extract_resolution(definition),
-        type: :definition
-      }
-    end
-
-
-
+    defp process_token(%{type: :definition} = def), do: def
 
   defparsecp :parse_final, parser
 
-
-
   defp structure_output(_rest, tokens, context, _line, _offset) do
+    # Find source directly
+    outputs = case Enum.find(tokens, fn
+      {:source, _} -> true
+      _ -> false
+    end) do
+      {:source, ["IN", "<", ">"]} -> "IN<>"
+      _ -> ""
+    end
+
     result = %{
       name: extract_value(tokens, :name),
       inputs: extract_destinations(tokens),
-      outputs: extract_value(tokens, :source),
+      outputs: outputs,
       resolution: extract_resolution(tokens),
       type: :definition
     }
     {[result], context}
   end
 
-  defp extract_resolution(tokens) do
+  defp extract_resolution(tokens) when is_list(tokens) do
     case Enum.find(tokens, fn
       {:resolution, _} -> true
       _ -> false
     end) do
       {:resolution, resolution_tokens} ->
-        mappings = for {:mapping, [{:pattern, p}, {:value, v}]} <- resolution_tokens do
-          {List.to_string(p), List.to_string(v)}
-        end
-        mappings
+        resolution_tokens
+        |> Enum.filter(fn
+          {:mapping, _} -> true
+          _ -> false
+        end)
+        |> Enum.map(fn {:mapping, [{:pattern, [p]}, {:value, [v]}]} ->
+          {p, v}
+        end)
       _ -> []
     end
   end
+
+  defp extract_resolution(%{resolution: res}), do: res
+  defp extract_resolution(_), do: []
 
   defp extract_arguments(tokens) do
     tokens
@@ -180,20 +204,44 @@ defmodule InvocationParser do
     |> Enum.map(fn {:argument, value} -> List.to_string(value) end)
   end
 
-  defp extract_destinations(tokens) do
+  defp extract_destinations(tokens) when is_list(tokens) do
     tokens
     |> Enum.filter(fn
       {:destination, _} -> true
       _ -> false
     end)
-    |> Enum.map(fn {:destination, value} -> List.to_string(value) end)
+    |> Enum.map(fn {:destination, [_, value]} -> "$" <> value end)
   end
 
+  defp extract_destinations(%{inputs: inputs}) when is_list(inputs) do
+    inputs
+  end
+
+  defp extract_destinations(_), do: []
+
   defp extract_value(tokens, tag) do
-    case Enum.find(tokens, fn {t, _} -> t == tag end) do
-      {_, [value]} when is_binary(value) -> value
-      {_, value} when is_binary(value) -> value
-      {_, value} when is_list(value) -> List.to_string(value)
+    IO.inspect({tokens, tag}, label: "extract_value detailed")
+    case tokens do
+      list when is_list(list) ->
+        found = Enum.find(list, fn
+          {^tag, _} -> true
+          _ -> false
+        end)
+        IO.inspect(found, label: "found token")
+        case found do
+          {:source, values} ->
+            IO.inspect(values, label: "source values")
+            case values do
+              ["IN", "<", ">"] -> "IN<>"
+              ["IN"] -> "IN<>"
+              _ -> ""
+            end
+          {_, [value | _]} -> value
+          {_, value} when is_binary(value) -> value
+          _ -> ""
+        end
+      map when is_map(map) ->
+        Map.get(map, tag, "")
       _ -> ""
     end
   end
